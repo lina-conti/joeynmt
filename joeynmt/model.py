@@ -37,6 +37,7 @@ class Model(nn.Module):
         trg_embed: Embeddings,
         src_vocab: Vocabulary,
         trg_vocab: Vocabulary,
+        teacher_forcing: str,
     ) -> None:
         """
         Create a new encoder-decoder model
@@ -47,6 +48,7 @@ class Model(nn.Module):
         :param trg_embed: target embedding
         :param src_vocab: source vocabulary
         :param trg_vocab: target vocabulary
+        :param teacher_forcing: string among {"on", "off", "alternating"}
         """
         super().__init__()
 
@@ -56,6 +58,9 @@ class Model(nn.Module):
         self.decoder = decoder
         self.src_vocab = src_vocab
         self.trg_vocab = trg_vocab
+        self.teacher_forcing = teacher_forcing
+        if teacher_forcing == "alternating":
+            self.alternating_boolean = True
         self.pad_index = self.trg_vocab.pad_index
         self.bos_index = self.trg_vocab.bos_index
         self.eos_index = self.trg_vocab.eos_index
@@ -93,7 +98,19 @@ class Model(nn.Module):
             assert self.loss_function is not None
             assert "trg" in kwargs and "trg_mask" in kwargs  # need trg to compute loss
 
-            out, _, _, _ = self._encode_decode(**kwargs)
+            if self.teacher_forcing == "on":
+                out, _, _, _ = self._encode_decode(**kwargs)
+            elif self.teacher_forcing == "off":
+                out = self._no_teacher_forcing_encode_decode(**kwargs)
+            else:   # alternating
+                print("CAREFUL, YOU SHOULDN'T BE HERE!")
+                """print(f"here, it is {self.alternating_boolean}")
+                if self.alternating_boolean:
+                    print("pile")
+                    out, _, _, _ = self._encode_decode(**kwargs)
+                else:
+                    print("face")
+                    out = self._no_teacher_forcing_encode_decode(**kwargs)"""
 
             # compute log probs
             log_probs = F.log_softmax(out, dim=-1)
@@ -108,6 +125,11 @@ class Model(nn.Module):
             n_correct = torch.sum(
                 log_probs.argmax(-1).masked_select(trg_mask).eq(
                     kwargs["trg"].masked_select(trg_mask)))
+
+            """if self.teacher_forcing == "alternating":
+                print(f"it was {self.alternating_boolean}")
+                self.alternating_boolean = False
+                print(f"it is now {self.alternating_boolean}")"""
 
             # return batch loss
             #     = sum over all elements in batch that are not pad
@@ -127,6 +149,54 @@ class Model(nn.Module):
             return_tuple = (outputs, hidden, att_probs, att_vectors)
 
         return tuple(return_tuple)
+
+    def _no_teacher_forcing_encode_decode(
+        self,
+        src: Tensor,
+        src_mask: Tensor,
+        src_length: Tensor,
+        trg_mask: Tensor = None,
+        **kwargs,
+    ) -> Tensor:
+
+        sequence_length = kwargs['trg_input'].size(1)
+
+        batch_size, _, src_len = src_mask.size()
+
+        encoder_output, encoder_hidden = self._encode(src=src,
+                                                    src_length=src_length,
+                                                    src_mask=src_mask,
+                                                    **kwargs)
+
+        # start with BOS-symbol for each sentence in the batch
+        ys = encoder_output.new_full((batch_size, 1), self.bos_index, dtype=torch.long)
+
+        # a subsequent mask is intersected with this in decoder forward pass
+        # idk what this does exactly
+        trg_mask = src_mask.new_ones([1, 1, 1])
+        if isinstance(self, torch.nn.DataParallel):
+            trg_mask = torch.stack([src_mask.new_ones([1, 1]) for _ in self.device_ids])
+
+        for step in range(sequence_length):
+            out, _, _, _ = self._decode(
+                trg_input=ys,  # model.trg_embed(ys) # embed the previous tokens
+                encoder_output=encoder_output,
+                encoder_hidden=None,  # not used for Transformers, I think
+                src_mask=src_mask,
+                unroll_steps=None,
+                decoder_hidden=None,
+                trg_mask=trg_mask,
+                return_attention=False,
+            )
+            full_output = out
+            out = out[:, -1]  # logits
+
+            # take the most likely token
+            prob, next_word = torch.max(out, dim=1)
+            next_word = next_word.data
+            ys = torch.cat([ys, next_word.unsqueeze(-1)], dim=1)
+
+        return full_output
 
     def _encode_decode(
         self,
@@ -343,6 +413,7 @@ def build_model(cfg: dict = None,
         trg_embed=trg_embed,
         src_vocab=src_vocab,
         trg_vocab=trg_vocab,
+        teacher_forcing=cfg.get("teacher_forcing", "on"),
     )
 
     # tie softmax layer with trg embeddings
