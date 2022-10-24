@@ -1,4 +1,4 @@
-# &nbsp; ![Joey-NMT](joey2-small.png) Joey NMT with option to deactivate teacher
+# &nbsp; ![Joey-NMT](joey2-small.png) Joey NMT with option to deactivate teacher forcing
 
 :koala: This repository is forked from [joeynmt/joeynmt](https://github.com/joeynmt/joeynmt). 
 
